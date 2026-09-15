@@ -1,0 +1,23 @@
+# Dependencias
+node_modules/
+dist/
+.DS_Store
+
+# Entornos y credenciales
+.env
+.env.*
+*.env
+
+# Bases de datos SQLite locales y datos dinámicos
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+
+# Archivos de caché y compilación de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+logs/
