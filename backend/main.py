@@ -1,12 +1,15 @@
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 import sqlite3
 import os
-import httpx
+import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
+from database import DB_PATH, init_db
+from models import get_ip_info, parse_user_agent
+from schemas import TrackRequest
 
 load_dotenv()
 
@@ -16,34 +19,7 @@ security = HTTPBasic()
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASS = os.getenv("ADMIN_PASS")
 
-DB_PATH = "/app/data/database.db"
-
-def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS clicks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            section TEXT,
-            ip TEXT,
-            user_agent TEXT,
-            timestamp TEXT
-        )
-    """)
-    for col in ["user_agent", "timestamp", "section", "ip"]:
-        try:
-            cursor.execute(f"ALTER TABLE clicks ADD COLUMN {col} TEXT;")
-        except Exception:
-            pass
-    conn.commit()
-    conn.close()
-
 init_db()
-
-class TrackRequest(BaseModel):
-    section: str = "Página Principal / Visita"
-
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_user = credentials.username == ADMIN_USER
@@ -55,76 +31,6 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
-
-async def get_ip_info(ip: str):
-    if not ip or ip in ("127.0.0.1", "localhost", "::1") or ip.startswith("192.168.") or ip.startswith("10."):
-        return {
-            "country": "Red Local", "region": "Local", "city": "Local", "zip": "-",
-            "lat": 0, "lon": 0, "isp": "Red Privada", "org": "Local Network",
-            "asn": "-", "asname": "-", "timezone": "America/Mexico_City"
-        }
-    try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,zip,lat,lon,isp,org,as,timezone")
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "success":
-                    as_full = data.get("as", "")
-                    as_parts = as_full.split(" ", 1) if as_full else ["-", "-"]
-                    return {
-                        "country": data.get("country", "-"),
-                        "region": data.get("regionName", "-"),
-                        "city": data.get("city", "-"),
-                        "zip": data.get("zip", "-"),
-                        "lat": data.get("lat", 0),
-                        "lon": data.get("lon", 0),
-                        "isp": data.get("isp", "-"),
-                        "org": data.get("org", "-"),
-                        "asn": as_parts[0] if len(as_parts) > 0 else "-",
-                        "asname": as_parts[1] if len(as_parts) > 1 else "-",
-                        "timezone": data.get("timezone", "-")
-                    }
-    except Exception:
-        pass
-    return {
-        "country": "-", "region": "-", "city": "-", "zip": "-",
-        "lat": 0, "lon": 0, "isp": "-", "org": "-", "asn": "-", "asname": "-", "timezone": "-"
-    }
-
-def parse_user_agent(ua: str):
-    if not ua:
-        return "Desconocido", "Desconocido", "Desconocido"
-    device = "Desktop"
-    if "Mobile" in ua or "Android" in ua or "iPhone" in ua:
-        device = "Móvil"
-    elif "Tablet" in ua or "iPad" in ua:
-        device = "Tablet"
-
-    browser = "Desconocido"
-    if "Chrome/" in ua and "Edg/" not in ua:
-        try:
-            b_ver = ua.split("Chrome/")[1].split(" ")[0].split(".")[0]
-            browser = f"Chrome {b_ver}"
-        except Exception:
-            browser = "Chrome"
-    elif "Firefox/" in ua:
-        browser = "Firefox"
-    elif "Safari/" in ua and "Chrome" not in ua:
-        browser = "Safari"
-    elif "Edg/" in ua:
-        browser = "Edge"
-
-    os_name = "Desconocido"
-    if "Windows NT 10" in ua or "Windows" in ua:
-        os_name = "Windows"
-    elif "Android" in ua:
-        os_name = "Android"
-    elif "iPhone" in ua or "iPad" in ua or "Macintosh" in ua:
-        os_name = "Apple / iOS"
-    elif "Linux" in ua:
-        os_name = "Linux"
-
-    return device, browser, os_name
 
 @app.post("/track")
 async def track_click(data: TrackRequest, request: Request):
@@ -223,7 +129,7 @@ async def get_analytics(username: str = Depends(verify_credentials)):
                 <td class='py-3 px-4 text-slate-400'>{ip_info.get('org', '-')}</td>
                 <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('asn', '-')}</td>
                 <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('asname', '-')}</td>
-                <td class='py-3 px-4 text-slate-400'>{ip_info.get('timezone', '-')}</td>
+                <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('timezone', '-')}</td>
                 <td class='py-3 px-4 text-pink-400 font-bold bg-pink-950/20 px-2 py-1 rounded'>{section_text}</td>
                 <td class='py-3 px-4 text-slate-300'>{device}</td>
                 <td class='py-3 px-4 text-slate-300'>{browser}</td>
@@ -235,7 +141,6 @@ async def get_analytics(username: str = Depends(verify_credentials)):
         hist_labels = list(secciones_historico.keys())
         hist_data = list(secciones_historico.values())
         
-        import json
         html_content = f"""
         <!DOCTYPE html>
         <html lang="es" class="dark">
