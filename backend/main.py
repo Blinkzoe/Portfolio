@@ -1,14 +1,16 @@
-from fastapi import FastAPI, Request, Depends, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse
-import sqlite3
-import os
-import json
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+import json
+import os
+import sqlite3
 
 from database import DB_PATH, init_db
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from models import get_ip_info, parse_user_agent
+import httpx
+import pytz
 from schemas import TrackRequest
 
 load_dotenv()
@@ -18,8 +20,13 @@ security = HTTPBasic()
 
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASS = os.getenv("ADMIN_PASS")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 init_db()
+
+TZ_MEXICO = pytz.timezone("America/Mexico_City")
+
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_user = credentials.username == ADMIN_USER
@@ -32,115 +39,228 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         )
     return credentials.username
 
+
+async def send_telegram_alert(section: str, page: str, ip: str, country: str, city: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    
+    # Mensaje formateado para Telegram
+    message = (
+        f"🚨 **¡Nueva Visita en el Portafolio!**\n\n"
+        f"📌 **Sección:** {section}\n"
+        f"🌐 **Procedencia:** {page}\n"
+        f"🌍 **IP:** {ip}\n"
+        f"📍 **Ubicación:** {city}, {country}"
+    )
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(url, json=payload, timeout=5.0)
+        except Exception:
+            pass  # Si falla Telegram de forma temporal, no afecta la respuesta web
+
+
 @app.post("/track")
-async def track_click(data: TrackRequest, request: Request):
+async def track_click(data: TrackRequest, request: Request, background_tasks: BackgroundTasks):
     try:
         section = data.section
+
+        # Obtenemos la página exacta mandada desde el frontend, o usamos una por defecto si no viene
+        pagina_origen = (
+            data.page
+            if data.page and data.page != "No especificada"
+            else "Directo / Mismo sitio"
+        )
+
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            client_ip = forwarded.split(',')[0].strip()
+            client_ip = forwarded.split(",")[0].strip()
         elif request.client:
             client_ip = request.client.host
         else:
             client_ip = "127.0.0.1"
-            
+
         user_agent = request.headers.get("user-agent", "Desconocido")
-        
+        accept_lang = request.headers.get("accept-language", "-")
+        local_timestamp = datetime.now(TZ_MEXICO).isoformat()
+
+        ip_info = await get_ip_info(client_ip)
+        device, browser, os_name = parse_user_agent(user_agent)
+
+        country = ip_info.get("country", "-")
+        region = ip_info.get("region", "-")
+        city = ip_info.get("city", "-")
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO clicks (section, ip, user_agent, timestamp) VALUES (?, ?, ?, ?)", 
-                       (section, client_ip, user_agent, datetime.now().isoformat()))
+        cursor.execute(
+            """
+                INSERT INTO clicks (
+                    section, ip, user_agent, timestamp, 
+                    country, region, city, zip, lat, lon, 
+                    isp, org, asn, asname, timezone, 
+                    device, browser, os_name, referer, accept_language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                section,
+                client_ip,
+                user_agent,
+                local_timestamp,
+                country,
+                region,
+                city,
+                ip_info.get("zip", "-"),
+                ip_info.get("lat", 0),
+                ip_info.get("lon", 0),
+                ip_info.get("isp", "-"),
+                ip_info.get("org", "-"),
+                ip_info.get("asn", "-"),
+                ip_info.get("asname", "-"),
+                ip_info.get("timezone", "-"),
+                device,
+                browser,
+                os_name,
+                pagina_origen,
+                accept_lang,
+            ),
+        )
         conn.commit()
         conn.close()
+
+        # Disparamos la alerta de Telegram en segundo plano de forma instantánea
+        background_tasks.add_task(send_telegram_alert, section, pagina_origen, client_ip, country, city)
+
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
 
 @app.get("/analytics", response_class=HTMLResponse)
 async def get_analytics(username: str = Depends(verify_credentials)):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, section, ip, user_agent, timestamp FROM clicks ORDER BY id DESC LIMIT 50")
+        cursor.execute("""
+            SELECT 
+                id, section, ip, user_agent, timestamp,
+                country, region, city, zip, lat, lon,
+                isp, org, asn, asname, timezone,
+                device, browser, os_name, referer, accept_language
+            FROM clicks ORDER BY id DESC LIMIT 50
+        """)
         rows = cursor.fetchall()
-        
+        conn.close()
+
         total_visitas = len(rows)
         ips_unicas = len(set(row[2] for row in rows if row[2]))
-        
-        now = datetime.now()
+
+        now = datetime.now(TZ_MEXICO)
         hoy_str = now.strftime("%Y-%m-%d")
         hace_24h = now - timedelta(hours=24)
-        
+
         visitas_hoy = 0
         visitas_24h = 0
-        
         secciones_historico = {}
         secciones_diarias = {}
 
         rows_html = ""
         for row in rows:
-            row_id, sec_val, ip_val, ua_val, ts_val = row
+            (
+                row_id,
+                sec_val,
+                ip_val,
+                ua_val,
+                ts_val,
+                country,
+                region,
+                city,
+                zip_c,
+                lat,
+                lon,
+                isp,
+                org,
+                asn,
+                asname,
+                tz,
+                device,
+                browser,
+                os_name,
+                referer,
+                accept_lang,
+            ) = row
             section_text = sec_val if sec_val else "Visita General"
-            
+
             dt_str = ts_val or ""
             try:
                 dt = datetime.fromisoformat(dt_str)
                 dt_formatted = dt.strftime("%d/%m/%Y, %I:%M:%S %p")
                 fecha_dia = dt.strftime("%Y-%m-%d")
-                
+
                 if fecha_dia == hoy_str:
                     visitas_hoy += 1
                 if dt >= hace_24h:
                     visitas_24h += 1
-                
+
                 if fecha_dia not in secciones_diarias:
                     secciones_diarias[fecha_dia] = {}
-                secciones_diarias[fecha_dia][section_text] = secciones_diarias[fecha_dia].get(section_text, 0) + 1
-
+                secciones_diarias[fecha_dia][section_text] = (
+                    secciones_diarias[fecha_dia].get(section_text, 0) + 1
+                )
             except Exception:
                 dt_formatted = dt_str
                 fecha_dia = "Desconocido"
 
-            secciones_historico[section_text] = secciones_historico.get(section_text, 0) + 1
+            secciones_historico[section_text] = (
+                secciones_historico.get(section_text, 0) + 1
+            )
 
             raw_ip = ip_val if ip_val else "127.0.0.1"
-            ip = raw_ip.split(',')[0].strip()
-            ua = ua_val if ua_val else ""
-            device, browser, os_name = parse_user_agent(ua)
-            ip_info = await get_ip_info(ip)
-            
-            lat = ip_info.get('lat', 0)
-            lon = ip_info.get('lon', 0)
+            ip = raw_ip.split(",")[0].strip()
+
             has_coords = lat != 0 and lat != "0" and lon != 0 and lon != "0"
-            
             coords_display = f"{lat}, {lon}" if has_coords else "-"
-            map_link = f"<a href='https://www.google.com/maps?q={lat},{lon}' target='_blank' class='text-pink-400 hover:underline block text-[11px]'>📍 Ver mapa</a>" if has_coords else ""
+            map_link = (
+                f"<a href='https://www.google.com/maps?q={lat},{lon}'"
+                " target='_blank' class='text-pink-400 hover:underline block"
+                " text-[11px]'>📍 Ver mapa</a>"
+                if has_coords
+                else ""
+            )
 
             rows_html += f"""
-            <tr class='border-b border-slate-800/60 hover:bg-slate-900/40 text-xs'>
-                <td class='py-3 px-4 text-slate-300 font-mono'>{dt_formatted}</td>
-                <td class='py-3 px-4 font-mono text-cyan-400 font-semibold'>{ip}</td>
-                <td class='py-3 px-4 text-slate-300'>{ip_info.get('country', '-')}</td>
-                <td class='py-3 px-4 text-slate-300'>{ip_info.get('region', '-')}</td>
-                <td class='py-3 px-4 text-slate-300'>{ip_info.get('city', '-')}</td>
-                <td class='py-3 px-4 text-slate-300'>{ip_info.get('zip', '-')}</td>
-                <td class='py-3 px-4 font-mono text-slate-300'>{coords_display} {map_link}</td>
-                <td class='py-3 px-4 text-slate-400'>{ip_info.get('isp', '-')}</td>
-                <td class='py-3 px-4 text-slate-400'>{ip_info.get('org', '-')}</td>
-                <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('asn', '-')}</td>
-                <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('asname', '-')}</td>
-                <td class='py-3 px-4 font-mono text-slate-400'>{ip_info.get('timezone', '-')}</td>
-                <td class='py-3 px-4 text-pink-400 font-bold bg-pink-950/20 px-2 py-1 rounded'>{section_text}</td>
-                <td class='py-3 px-4 text-slate-300'>{device}</td>
-                <td class='py-3 px-4 text-slate-300'>{browser}</td>
-                <td class='py-3 px-4 text-slate-300'>{os_name}</td>
-            </tr>
-            """
-        conn.close()
+                <tr class='border-b border-slate-800/60 hover:bg-slate-900/40 text-xs'>
+                    <td class='py-3 px-4 text-slate-300 font-mono'>{dt_formatted}</td>
+                    <td class='py-3 px-4 font-mono text-cyan-400 font-semibold'>{ip}</td>
+                    <td class='py-3 px-4 text-slate-300'>{country or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300'>{region or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300'>{city or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300'>{zip_c or '-'}</td>
+                    <td class='py-3 px-4 font-mono text-slate-300'>{coords_display} {map_link}</td>
+                    <td class='py-3 px-4 text-slate-400'>{isp or '-'}</td>
+                    <td class='py-3 px-4 text-slate-400'>{org or '-'}</td>
+                    <td class='py-3 px-4 font-mono text-slate-400'>{asn or '-'}</td>
+                    <td class='py-3 px-4 font-mono text-slate-400'>{asname or '-'}</td>
+                    <td class='py-3 px-4 font-mono text-slate-400'>{tz or '-'}</td>
+                    <td class='py-3 px-4 text-pink-400 font-bold bg-pink-950/20 px-2 py-1 rounded'>{section_text}</td>
+                    <td class='py-3 px-4 text-slate-300'>{device or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300'>{browser or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300'>{os_name or '-'}</td>
+                    <td class='py-3 px-4 text-slate-300 truncate max-w-xs' title='{referer}'>{referer}</td>
+                    <td class='py-3 px-4 text-slate-400 font-mono'>{accept_lang}</td>
+                </tr>
+                """
 
         hist_labels = list(secciones_historico.keys())
         hist_data = list(secciones_historico.values())
-        
+
         html_content = f"""
         <!DOCTYPE html>
         <html lang="es" class="dark">
@@ -216,10 +336,12 @@ async def get_analytics(username: str = Depends(verify_credentials)):
                                     <th class="py-3 px-4">Dispositivo</th>
                                     <th class="py-3 px-4">Navegador</th>
                                     <th class="py-3 px-4">Sistema operativo</th>
+                                    <th class="py-3 px-4">Procedencia / Página</th>
+                                    <th class="py-3 px-4">Idioma</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {rows_html if rows_html else "<tr><td colspan='16' class='py-8 text-center text-slate-500 text-xs'>No hay registros todavía.</td></tr>"}
+                                {rows_html if rows_html else "<tr><td colspan='18' class='py-8 text-center text-slate-500 text-xs'>No hay registros todavía.</td></tr>"}
                             </tbody>
                         </table>
                     </div>
@@ -295,7 +417,10 @@ async def get_analytics(username: str = Depends(verify_credentials)):
         """
         return HTMLResponse(content=html_content)
     except Exception as e:
-        return HTMLResponse(content=f"<h1>Error interno en Analytics: {str(e)}</h1>", status_code=500)
+        return HTMLResponse(
+            content=f"<h1>Error interno en Analytics: {str(e)}</h1>", status_code=500
+        )
+
 
 @app.get("/")
 async def root():
