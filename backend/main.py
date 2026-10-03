@@ -143,285 +143,1516 @@ async def track_click(data: TrackRequest, request: Request, background_tasks: Ba
         return {"status": "error", "detail": str(e)}
 
 
+
+
 @app.get("/analytics", response_class=HTMLResponse)
-async def get_analytics(username: str = Depends(verify_credentials)):
+async def analytics(credentials: HTTPBasicCredentials = Depends(security)):
+    verify_credentials(credentials)
+
+    import html
+    import json
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                id, section, ip, user_agent, timestamp,
-                country, region, city, zip, lat, lon,
-                isp, org, asn, asname, timezone,
-                device, browser, os_name, referer, accept_language
-            FROM clicks ORDER BY id DESC LIMIT 50
-        """)
-        rows = cursor.fetchall()
-        conn.close()
-
-        total_visitas = len(rows)
-        ips_unicas = len(set(row[2] for row in rows if row[2]))
-
-        now = datetime.now(TZ_MEXICO)
-        hoy_str = now.strftime("%Y-%m-%d")
-        hace_24h = now - timedelta(hours=24)
-
-        visitas_hoy = 0
-        visitas_24h = 0
-        secciones_historico = {}
-        secciones_diarias = {}
-
-        rows_html = ""
-        for row in rows:
-            (
-                row_id,
-                sec_val,
-                ip_val,
-                ua_val,
-                ts_val,
+        rows = conn.execute("""
+            SELECT
+                id,
+                section,
+                ip,
+                user_agent,
+                timestamp,
                 country,
                 region,
                 city,
-                zip_c,
+                zip,
                 lat,
                 lon,
                 isp,
                 org,
                 asn,
                 asname,
-                tz,
+                timezone,
                 device,
                 browser,
                 os_name,
                 referer,
-                accept_lang,
-            ) = row
-            section_text = sec_val if sec_val else "Visita General"
+                accept_language
+            FROM clicks
+            ORDER BY id DESC
+        """).fetchall()
 
-            dt_str = ts_val or ""
-            try:
-                dt = datetime.fromisoformat(dt_str)
-                dt_formatted = dt.strftime("%d/%m/%Y, %I:%M:%S %p")
-                fecha_dia = dt.strftime("%Y-%m-%d")
+        total_visitas = len(rows)
 
-                if fecha_dia == hoy_str:
-                    visitas_hoy += 1
-                if dt >= hace_24h:
-                    visitas_24h += 1
+        ips_unicas = len({
+            str(r["ip"]).strip()
+            for r in rows
+            if r["ip"]
+        })
 
-                if fecha_dia not in secciones_diarias:
-                    secciones_diarias[fecha_dia] = {}
-                secciones_diarias[fecha_dia][section_text] = (
-                    secciones_diarias[fecha_dia].get(section_text, 0) + 1
-                )
-            except Exception:
-                dt_formatted = dt_str
-                fecha_dia = "Desconocido"
+        hoy = datetime.now(TZ_MEXICO).strftime("%Y-%m-%d")
 
-            secciones_historico[section_text] = (
-                secciones_historico.get(section_text, 0) + 1
-            )
-
-            raw_ip = ip_val if ip_val else "127.0.0.1"
-            ip = raw_ip.split(",")[0].strip()
-
-            has_coords = lat != 0 and lat != "0" and lon != 0 and lon != "0"
-            coords_display = f"{lat}, {lon}" if has_coords else "-"
-            map_link = (
-                f"<a href='https://www.google.com/maps?q={lat},{lon}'"
-                " target='_blank' class='text-pink-400 hover:underline block"
-                " text-[11px]'>📍 Ver mapa</a>"
-                if has_coords
-                else ""
-            )
-
-            rows_html += f"""
-                <tr class='border-b border-slate-800/60 hover:bg-slate-900/40 text-xs'>
-                    <td class='py-3 px-4 text-slate-300 font-mono'>{dt_formatted}</td>
-                    <td class='py-3 px-4 font-mono text-cyan-400 font-semibold'>{ip}</td>
-                    <td class='py-3 px-4 text-slate-300'>{country or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300'>{region or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300'>{city or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300'>{zip_c or '-'}</td>
-                    <td class='py-3 px-4 font-mono text-slate-300'>{coords_display} {map_link}</td>
-                    <td class='py-3 px-4 text-slate-400'>{isp or '-'}</td>
-                    <td class='py-3 px-4 text-slate-400'>{org or '-'}</td>
-                    <td class='py-3 px-4 font-mono text-slate-400'>{asn or '-'}</td>
-                    <td class='py-3 px-4 font-mono text-slate-400'>{asname or '-'}</td>
-                    <td class='py-3 px-4 font-mono text-slate-400'>{tz or '-'}</td>
-                    <td class='py-3 px-4 text-pink-400 font-bold bg-pink-950/20 px-2 py-1 rounded'>{section_text}</td>
-                    <td class='py-3 px-4 text-slate-300'>{device or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300'>{browser or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300'>{os_name or '-'}</td>
-                    <td class='py-3 px-4 text-slate-300 truncate max-w-xs' title='{referer}'>{referer}</td>
-                    <td class='py-3 px-4 text-slate-400 font-mono'>{accept_lang}</td>
-                </tr>
-                """
-
-        hist_labels = list(secciones_historico.keys())
-        hist_data = list(secciones_historico.values())
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="es" class="dark">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Panel de Estadísticas - Orlando Morales</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        </head>
-        <body class="bg-slate-950 text-slate-100 min-h-screen p-6 md:p-10 font-sans">
-            <div class="max-w-[95%] mx-auto space-y-8">
-                <header class="text-center space-y-2 border-b border-slate-800 pb-6">
-                    <h1 class="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 via-purple-400 to-cyan-400">
-                        📊 Panel de Analíticas y Clics
-                    </h1>
-                    <p class="text-xs text-slate-400">Control de tráfico, rendimiento de secciones y geolocalización de visitantes.</p>
-                </header>
-
-                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-center">
-                    <div class="bg-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
-                        <span class='text-xs text-slate-400 block uppercase tracking-wider font-semibold'>Registros (Últimos 50)</span>
-                        <span class='text-3xl font-extrabold text-white mt-2 block'>{total_visitas}</span>
-                    </div>
-                    <div class="bg-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
-                        <span class='text-xs text-slate-400 block uppercase tracking-wider font-semibold'>IPs Únicas</span>
-                        <span class='text-3xl font-extrabold text-white mt-2 block'>{ips_unicas}</span>
-                    </div>
-                    <div class="bg-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
-                        <span class='text-xs text-slate-400 block uppercase tracking-wider font-semibold'>Hoy</span>
-                        <span class='text-3xl font-extrabold text-white mt-2 block'>{visitas_hoy}</span>
-                    </div>
-                    <div class="bg-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
-                        <span class='text-xs text-slate-400 block uppercase tracking-wider font-semibold'>Últimas 24 horas</span>
-                        <span class='text-3xl font-extrabold text-white mt-2 block'>{visitas_24h}</span>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-2xl">
-                        <h3 class="text-sm font-bold text-pink-400 mb-4 uppercase tracking-wider">📈 Clics Totales por Sección (Histórico)</h3>
-                        <div class="relative h-72">
-                            <canvas id="historicalChart"></canvas>
-                        </div>
-                    </div>
-                    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-2xl">
-                        <h3 class="text-sm font-bold text-cyan-400 mb-4 uppercase tracking-wider">📅 Actividad Diaria por Sección (Últimos Días)</h3>
-                        <div class="relative h-72">
-                            <canvas id="dailyChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
-                    <h3 class="text-sm font-bold text-slate-300 uppercase tracking-wider">📋 Historial Detallado de Conexiones</h3>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left whitespace-nowrap">
-                            <thead>
-                                <tr class="border-b border-slate-800 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                                    <th class="py-3 px-4">Fecha y Hora</th>
-                                    <th class="py-3 px-4">Dirección IP</th>
-                                    <th class="py-3 px-4">País</th>
-                                    <th class="py-3 px-4">Estado</th>
-                                    <th class="py-3 px-4">Ciudad</th>
-                                    <th class="py-3 px-4">C.P.</th>
-                                    <th class="py-3 px-4">Coordenadas</th>
-                                    <th class="py-3 px-4">ISP</th>
-                                    <th class="py-3 px-4">Organización</th>
-                                    <th class="py-3 px-4">ASN</th>
-                                    <th class="py-3 px-4">AS Name</th>
-                                    <th class="py-3 px-4">Zona horaria</th>
-                                    <th class="py-3 px-4">Acción / Sección</th>
-                                    <th class="py-3 px-4">Dispositivo</th>
-                                    <th class="py-3 px-4">Navegador</th>
-                                    <th class="py-3 px-4">Sistema operativo</th>
-                                    <th class="py-3 px-4">Procedencia / Página</th>
-                                    <th class="py-3 px-4">Idioma</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows_html if rows_html else "<tr><td colspan='18' class='py-8 text-center text-slate-500 text-xs'>No hay registros todavía.</td></tr>"}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <script>
-                const histLabels = {json.dumps(hist_labels)};
-                const histData = {json.dumps(hist_data)};
-                
-                const ctxHist = document.getElementById('historicalChart').getContext('2d');
-                new Chart(ctxHist, {{
-                    type: 'bar',
-                    data: {{
-                        labels: histLabels,
-                        datasets: [{{
-                            label: 'Clics Históricos',
-                            data: histData,
-                            backgroundColor: '#ec4899',
-                            borderRadius: 6
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {{ legend: {{ display: false }} }},
-                        scales: {{
-                            x: {{ ticks: {{ color: '#94a3b8', font: {{ size: 10 }} }}, grid: {{ display: false }} }},
-                            y: {{ ticks: {{ color: '#94a3b8', font: {{ size: 10 }}, precision: 0 }}, grid: {{ color: '#1e293b' }} }}
-                        }}
-                    }}
-                }});
-
-                const dailyDates = {json.dumps([(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)])};
-                const rawDailyData = {json.dumps(secciones_diarias)};
-                const allSections = {json.dumps(list(secciones_historico.keys()))};
-                const palette = ['#ec4899', '#38bdf8', '#c084fc', '#34d399', '#fbbf24', '#fb8500', '#a78bfa'];
-
-                const dailyDatasets = allSections.map((sec, index) => {{
-                    const dataPoints = dailyDates.map(date => {{
-                        return (rawDailyData[date] && rawDailyData[date][sec]) ? rawDailyData[date][sec] : 0;
-                    }});
-                    return {{
-                        label: sec,
-                        data: dataPoints,
-                        backgroundColor: palette[index % palette.length],
-                        borderRadius: 4
-                    }};
-                }});
-
-                const ctxDaily = document.getElementById('dailyChart').getContext('2d');
-                new Chart(ctxDaily, {{
-                    type: 'bar',
-                    data: {{
-                        labels: dailyDates,
-                        datasets: dailyDatasets
-                    }},
-                    options: {{
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {{
-                            legend: {{ labels: {{ color: '#cbd5e1', font: {{ size: 11 }} }} }}
-                        }},
-                        scales: {{
-                            x: {{ stacked: true, ticks: {{ color: '#94a3b8', font: {{ size: 10 }} }}, grid: {{ display: false }} }},
-                            y: {{ stacked: true, ticks: {{ color: '#94a3b8', font: {{ size: 10 }}, precision: 0 }}, grid: {{ color: '#1e293b' }} }}
-                        }}
-                    }}
-                }});
-            </script>
-        </body>
-        </html>
-        """
-        return HTMLResponse(content=html_content)
-    except Exception as e:
-        return HTMLResponse(
-            content=f"<h1>Error interno en Analytics: {str(e)}</h1>", status_code=500
+        visitas_hoy = sum(
+            1 for r in rows
+            if r["timestamp"]
+            and str(r["timestamp"])[:10] == hoy
         )
 
+        # -----------------------------------------------------
+        # OPCIONES DE FILTRO
+        # -----------------------------------------------------
 
-@app.get("/")
-async def root():
-    return {"message": "Backend de FastAPI funcionando correctamente"}
+        ips = sorted({
+            str(r["ip"]).strip()
+            for r in rows
+            if r["ip"]
+        })
+
+        sections = sorted({
+            str(r["section"]).strip()
+            for r in rows
+            if r["section"]
+        })
+
+        dates = sorted({
+            str(r["timestamp"])[:10]
+            for r in rows
+            if r["timestamp"]
+        }, reverse=True)
+
+        ip_options = "".join(
+            '<option value="' +
+            html.escape(ip, quote=True) +
+            '">' +
+            html.escape(ip) +
+            '</option>'
+            for ip in ips
+        )
+
+        section_options = "".join(
+            '<option value="' +
+            html.escape(section, quote=True) +
+            '">' +
+            html.escape(section) +
+            '</option>'
+            for section in sections
+        )
+
+        date_options = "".join(
+            '<option value="' +
+            html.escape(date, quote=True) +
+            '">' +
+            html.escape(date) +
+            '</option>'
+            for date in dates
+        )
+
+        # -----------------------------------------------------
+        # TABLA
+        # -----------------------------------------------------
+
+        rows_html = ""
+
+        for r in rows:
+
+            timestamp = str(r["timestamp"] or "")
+            fecha = timestamp[:10]
+
+            ip = str(r["ip"] or "")
+            section = str(r["section"] or "")
+
+            country = str(r["country"] or "")
+            region = str(r["region"] or "")
+            city = str(r["city"] or "")
+            zip_code = str(r["zip"] or "")
+
+            lat = str(r["lat"] or "")
+            lon = str(r["lon"] or "")
+
+            isp = str(r["isp"] or "")
+            org = str(r["org"] or "")
+            asn = str(r["asn"] or "")
+            asname = str(r["asname"] or "")
+
+            timezone = str(r["timezone"] or "")
+            device = str(r["device"] or "")
+            browser = str(r["browser"] or "")
+            os_name = str(r["os_name"] or "")
+
+            referer = str(r["referer"] or "")
+            language = str(r["accept_language"] or "")
+            user_agent = str(r["user_agent"] or "")
+
+            location = ", ".join(
+                x for x in [city, region, country]
+                if x
+            )
+
+            coordinates = ""
+
+            if lat and lon:
+                coordinates = (
+                    '<a href="https://www.google.com/maps?q='
+                    + html.escape(lat, quote=True)
+                    + ','
+                    + html.escape(lon, quote=True)
+                    + '" target="_blank" '
+                    'class="text-blue-400 hover:text-blue-300">'
+                    + html.escape(lat)
+                    + ', '
+                    + html.escape(lon)
+                    + '</a>'
+                )
+
+            rows_html += """
+<tr
+    class="analytics-row border-b border-slate-800/60 hover:bg-slate-900/40"
+    data-ip="__IP__"
+    data-section="__SECTION__"
+    data-date="__DATE__"
+>
+
+<td class="px-3 py-3">__ID__</td>
+
+<td class="px-3 py-3">
+    <span class="text-blue-400 font-medium">
+        __SECTION_TEXT__
+    </span>
+</td>
+
+<td class="px-3 py-3 text-slate-300">
+    __IP_TEXT__
+</td>
+
+<td class="px-3 py-3 text-slate-400 whitespace-nowrap">
+    __TIMESTAMP__
+</td>
+
+<td class="px-3 py-3 text-slate-300">
+    __LOCATION__
+</td>
+
+<td class="px-3 py-3">
+    __COORDINATES__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __ISP__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __ORG__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __ASN__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __ASNAME__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __TIMEZONE__
+</td>
+
+<td class="px-3 py-3 text-slate-300">
+    __DEVICE__
+</td>
+
+<td class="px-3 py-3 text-slate-300">
+    __BROWSER__
+</td>
+
+<td class="px-3 py-3 text-slate-300">
+    __OS__
+</td>
+
+<td class="px-3 py-3 text-slate-400 max-w-xs truncate"
+    title="__REFERER_RAW__">
+    __REFERER__
+</td>
+
+<td class="px-3 py-3 text-slate-400">
+    __LANGUAGE__
+</td>
+
+<td class="px-3 py-3 text-slate-500 max-w-sm truncate"
+    title="__UA_RAW__">
+    __UA__
+</td>
+
+<td class="px-3 py-3 text-slate-500">
+    __ZIP__
+</td>
+
+</tr>
+""".replace(
+    "__IP__", html.escape(ip, quote=True)
+).replace(
+    "__SECTION__", html.escape(section, quote=True)
+).replace(
+    "__DATE__", html.escape(fecha, quote=True)
+).replace(
+    "__ID__", str(r["id"] or "")
+).replace(
+    "__SECTION_TEXT__", html.escape(section)
+).replace(
+    "__IP_TEXT__", html.escape(ip)
+).replace(
+    "__TIMESTAMP__", html.escape(timestamp)
+).replace(
+    "__LOCATION__", html.escape(location)
+).replace(
+    "__COORDINATES__", coordinates
+).replace(
+    "__ISP__", html.escape(isp)
+).replace(
+    "__ORG__", html.escape(org)
+).replace(
+    "__ASN__", html.escape(asn)
+).replace(
+    "__ASNAME__", html.escape(asname)
+).replace(
+    "__TIMEZONE__", html.escape(timezone)
+).replace(
+    "__DEVICE__", html.escape(device)
+).replace(
+    "__BROWSER__", html.escape(browser)
+).replace(
+    "__OS__", html.escape(os_name)
+).replace(
+    "__REFERER_RAW__", html.escape(referer, quote=True)
+).replace(
+    "__REFERER__", html.escape(referer)
+).replace(
+    "__LANGUAGE__", html.escape(language)
+).replace(
+    "__UA_RAW__", html.escape(user_agent, quote=True)
+).replace(
+    "__UA__", html.escape(user_agent)
+).replace(
+    "__ZIP__", html.escape(zip_code)
+)
+
+        if not rows_html:
+            rows_html = """
+<tr>
+<td colspan="18"
+    class="px-4 py-8 text-center text-slate-500">
+    No hay registros todavía.
+</td>
+</tr>
+"""
+
+        # -----------------------------------------------------
+        # HTML
+        # -----------------------------------------------------
+
+        page = """
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>Portfolio Analytics</title>
+
+
+
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+
+
+
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<div class="max-w-[1800px] mx-auto px-4 py-8">
+
+<!-- HEADER -->
+
+<div class="mb-8">
+
+<h1 class="text-3xl font-bold">
+Portfolio Analytics
+</h1>
+
+<p class="text-slate-400 mt-2">
+Eventos registrados en el portfolio
+</p>
+
+</div>
+
+
+<!-- STATS -->
+
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+<div class="text-slate-400 text-sm">
+Visitas
+</div>
+
+<div id="statTotal"
+     class="text-3xl font-bold mt-2">
+__TOTAL_VISITAS__
+</div>
+
+</div>
+
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+<div class="text-slate-400 text-sm">
+IP únicas
+</div>
+
+<div id="statIps"
+     class="text-3xl font-bold mt-2">
+__IPS_UNICAS__
+</div>
+
+</div>
+
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+<div class="text-slate-400 text-sm">
+Visitas hoy
+</div>
+
+<div id="statToday"
+     class="text-3xl font-bold mt-2">
+__VISITAS_HOY__
+</div>
+
+</div>
+
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+<div class="text-slate-400 text-sm">
+Registros filtrados
+</div>
+
+<div id="statFiltered"
+     class="text-3xl font-bold mt-2">
+__TOTAL_VISITAS__
+</div>
+
+</div>
+
+</div>
+
+
+<!-- FILTROS -->
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-8">
+
+<div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-4">
+
+<div>
+
+<label class="block text-sm text-slate-400 mb-2">
+IP
+</label>
+
+<select id="filterIp"
+class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2">
+
+<option value="">
+Todas las IP
+</option>
+
+__IP_OPTIONS__
+
+</select>
+
+</div>
+
+
+<div>
+
+<label class="block text-sm text-slate-400 mb-2">
+Acción / sección
+</label>
+
+<select id="filterSection"
+class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2">
+
+<option value="">
+Todas las acciones
+</option>
+
+__SECTION_OPTIONS__
+
+</select>
+
+</div>
+
+
+<div>
+
+<label class="block text-sm text-slate-400 mb-2">
+Fecha
+</label>
+
+<select id="filterDate"
+class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2">
+
+<option value="">
+Todas las fechas
+</option>
+
+__DATE_OPTIONS__
+
+</select>
+
+</div>
+
+
+<div class="flex items-end">
+
+<button id="clearFilters"
+class="w-full px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600">
+
+Limpiar filtros
+
+</button>
+
+</div>
+
+</div>
+
+
+<div class="mt-4 text-sm text-slate-400">
+
+Registros encontrados:
+
+<span id="filterCount"
+class="font-semibold text-slate-200">
+0
+</span>
+
+</div>
+
+</div>
+
+
+<!-- GRAFICAS -->
+
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8">
+
+    <!-- GRAFICA 1 -->
+
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+        <h2 class="text-lg font-semibold mb-4">
+            Acciones / Secciones
+        </h2>
+
+        <div style="height:350px;">
+            <canvas id="historicalChart"></canvas>
+        </div>
+
+    </div>
+
+
+    <!-- GRAFICA 2 -->
+
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+
+        <h2 class="text-lg font-semibold mb-4">
+            Visitas por fecha
+        </h2>
+
+        <div style="
+            display:flex;
+            width:100%;
+            height:350px;
+            gap:18px;
+            align-items:stretch;
+        ">
+
+            <!-- CANVAS -->
+
+            <div style="
+                flex:1;
+                min-width:0;
+                position:relative;
+            ">
+
+                <canvas id="dailyChart"></canvas>
+
+            </div>
+
+
+            <!-- LEYENDA EXTERNA -->
+
+            <div id="dailyLegendExternal" style="
+                width:190px;
+                min-width:190px;
+                max-height:350px;
+                overflow-y:auto;
+                padding:8px 4px 8px 12px;
+                border-left:1px solid rgba(148,163,184,.25);
+                font-size:13px;
+            ">
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- TABLA -->
+
+<div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+
+<div class="overflow-x-auto">
+
+<table class="min-w-[1800px] w-full text-sm">
+
+<thead class="bg-slate-950">
+
+<tr>
+
+<th class="px-3 py-3 text-left">ID</th>
+<th class="px-3 py-3 text-left">Acción</th>
+<th class="px-3 py-3 text-left">IP</th>
+<th class="px-3 py-3 text-left">Fecha</th>
+<th class="px-3 py-3 text-left">Ubicación</th>
+<th class="px-3 py-3 text-left">Coordenadas</th>
+<th class="px-3 py-3 text-left">ISP</th>
+<th class="px-3 py-3 text-left">Organización</th>
+<th class="px-3 py-3 text-left">ASN</th>
+<th class="px-3 py-3 text-left">AS Name</th>
+<th class="px-3 py-3 text-left">Timezone</th>
+<th class="px-3 py-3 text-left">Device</th>
+<th class="px-3 py-3 text-left">Browser</th>
+<th class="px-3 py-3 text-left">OS</th>
+<th class="px-3 py-3 text-left">Referer</th>
+<th class="px-3 py-3 text-left">Idioma</th>
+<th class="px-3 py-3 text-left">User Agent</th>
+<th class="px-3 py-3 text-left">ZIP</th>
+
+</tr>
+
+</thead>
+
+<tbody id="analyticsTable">
+
+__ROWS_HTML__
+
+</tbody>
+
+</table>
+
+</div>
+
+
+<!-- PAGINACION -->
+
+<div class="flex flex-col sm:flex-row items-center justify-between gap-4 px-5 py-4 border-t border-slate-800">
+
+<div id="paginationInfo"
+class="text-sm text-slate-400">
+</div>
+
+
+<div class="flex items-center gap-3">
+
+<button id="previousPage"
+class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40">
+
+← Anterior
+
+</button>
+
+
+<span id="pageInfo"
+class="text-sm text-slate-400">
+</span>
+
+
+<button id="nextPage"
+class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40">
+
+Siguiente →
+
+</button>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+<script>
+
+document.addEventListener("DOMContentLoaded", function () {
+
+const filterIp =
+document.getElementById("filterIp");
+
+const filterSection =
+document.getElementById("filterSection");
+
+const filterDate =
+document.getElementById("filterDate");
+
+const clearFilters =
+document.getElementById("clearFilters");
+
+const filterCount =
+document.getElementById("filterCount");
+
+const statTotal =
+document.getElementById("statTotal");
+
+const statIps =
+document.getElementById("statIps");
+
+const statToday =
+document.getElementById("statToday");
+
+const statFiltered =
+document.getElementById("statFiltered");
+
+const paginationInfo =
+document.getElementById("paginationInfo");
+
+const pageInfo =
+document.getElementById("pageInfo");
+
+const previousPage =
+document.getElementById("previousPage");
+
+const nextPage =
+document.getElementById("nextPage");
+
+const rows =
+Array.from(
+document.querySelectorAll(".analytics-row")
+);
+
+
+let filteredRows = rows.slice();
+
+let currentPage = 1;
+
+const rowsPerPage = 25;
+
+
+/* =========================================================
+   CHART 1
+   ========================================================= */
+
+
+const historicalChart = new Chart(
+    document.getElementById("historicalChart"),
+    {
+        type: "bar",
+
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: "Eventos",
+                    data: [],
+                    backgroundColor: "#3b82f6",
+                    borderColor: "#3b82f6",
+                    borderWidth: 1
+                }
+            ]
+        },
+
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+
+            plugins: {
+                legend: {
+                    display: false
+                },
+
+                tooltip: {
+                    mode: "index",
+                    intersect: false
+                }
+            },
+
+            scales: {
+                x: {
+                    stacked: false
+                },
+
+                y: {
+                    beginAtZero: true,
+
+                    ticks: {
+                        precision: 0
+                    }
+                }
+            }
+        }
+    }
+);
+
+
+/* =========================================================
+   CHART 2
+   ========================================================= */
+
+const dailyChart = new Chart(
+    document.getElementById("dailyChart"),
+    {
+        type: "bar",
+
+        data: {
+            labels: [],
+            datasets: []
+        },
+
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+
+            plugins: {
+                legend: {
+                    display: false
+                },
+
+                tooltip: {
+                    mode: "index",
+                    intersect: false
+                }
+            },
+
+            scales: {
+                x: {
+                    stacked: true
+                },
+
+                y: {
+                    stacked: true,
+                    beginAtZero: true,
+
+                    ticks: {
+                        precision: 0
+                    }
+                }
+            }
+        }
+    }
+);
+
+
+/* =========================================================
+   UPDATE CHARTS
+   ========================================================= */
+
+function updateCharts() {
+
+    /*
+     * =====================================================
+     * GRÁFICA 1
+     * Eventos por sección
+     * =====================================================
+     */
+
+    const sectionCounts = {};
+
+    /*
+     * =====================================================
+     * GRÁFICA 2
+     * Fechas -> secciones -> cantidad
+     * =====================================================
+     */
+
+    const dateSectionCounts = {};
+
+    filteredRows.forEach(function(row) {
+
+        const section =
+            row.dataset.section || "Sin sección";
+
+        const date =
+            row.dataset.date || "Sin fecha";
+
+        sectionCounts[section] =
+            (sectionCounts[section] || 0) + 1;
+
+        if (!dateSectionCounts[date]) {
+            dateSectionCounts[date] = {};
+        }
+
+        dateSectionCounts[date][section] =
+            (dateSectionCounts[date][section] || 0) + 1;
+    });
+
+
+    /*
+     * =====================================================
+     * GRÁFICA 1
+     * =====================================================
+     */
+
+    const sectionEntries =
+        Object.entries(sectionCounts)
+        .sort(function(a, b) {
+            return b[1] - a[1];
+        });
+
+    historicalChart.data.labels =
+        sectionEntries.map(function(item) {
+            return item[0];
+        });
+
+    historicalChart.data.datasets[0].data =
+        sectionEntries.map(function(item) {
+            return item[1];
+        });
+
+    historicalChart.update();
+
+
+    /*
+     * =====================================================
+     * GRÁFICA 2
+     * VISITAS POR FECHA Y COLOR POR SECCIÓN
+     * =====================================================
+     */
+
+    const dates =
+        Object.keys(dateSectionCounts).sort();
+
+
+    /*
+     * Obtener TODAS las secciones existentes
+     */
+
+    const sections = [];
+
+    dates.forEach(function(date) {
+
+        Object.keys(dateSectionCounts[date])
+        .forEach(function(section) {
+
+            if (sections.indexOf(section) === -1) {
+                sections.push(section);
+            }
+
+        });
+
+    });
+
+
+    /*
+     * =====================================================
+     * COLOR FIJO PARA CADA SECCIÓN
+     * =====================================================
+     */
+
+    const sectionColors = {
+
+        "home": "#3b82f6",
+        "Home": "#3b82f6",
+
+        "experience": "#22c55e",
+        "Experience": "#22c55e",
+
+        "projects": "#f59e0b",
+        "Projects": "#f59e0b",
+
+        "skills": "#ef4444",
+        "Skills": "#ef4444",
+
+        "education": "#8b5cf6",
+        "Education": "#8b5cf6",
+
+        "contact": "#ec4899",
+        "Contact": "#ec4899",
+
+        "cv": "#06b6d4",
+        "CV": "#06b6d4",
+
+        "github": "#84cc16",
+        "GitHub": "#84cc16",
+
+        "linkedin": "#f97316",
+        "LinkedIn": "#f97316"
+    };
+
+
+    /*
+     * Colores adicionales para cualquier sección
+     * que no esté arriba.
+     */
+
+    const extraColors = [
+        "#3b82f6",
+        "#22c55e",
+        "#f59e0b",
+        "#ef4444",
+        "#8b5cf6",
+        "#ec4899",
+        "#06b6d4",
+        "#84cc16",
+        "#f97316",
+        "#14b8a6",
+        "#6366f1",
+        "#e11d48",
+        "#0ea5e9",
+        "#a855f7",
+        "#10b981"
+    ];
+
+
+    /*
+     * =====================================================
+     * CREAR UN DATASET POR CADA SECCIÓN
+     * =====================================================
+     */
+
+    dailyChart.data.labels = dates;
+
+    const activeSections = sections.filter(function(section) {
+
+        return dates.some(function(date) {
+
+            return (dateSectionCounts[date][section] || 0) > 0;
+
+        });
+
+    });
+
+
+    dailyChart.data.datasets =
+        activeSections.map(function(section, index) {
+
+            let color =
+                sectionColors[section];
+
+            if (!color) {
+                color =
+                    extraColors[
+                        index % extraColors.length
+                    ];
+            }
+
+
+            return {
+
+                label: section,
+
+                data: dates.map(function(date) {
+
+                    return (
+                        dateSectionCounts[date][section] || 0
+                    );
+
+                }),
+
+                backgroundColor: color,
+
+                borderColor: color,
+
+                borderWidth: 1,
+
+                borderRadius: 3
+
+            };
+
+        });
+
+
+    /*
+     * Actualizar la gráfica
+     */
+
+    dailyChart.update();
+
+    renderDailyLegend();
+
+    
+
+    
+}
+
+
+
+
+
+
+
+
+function renderDailyLegend()
+{
+
+    const legend =
+        document.getElementById("dailyLegendExternal");
+
+    if (!legend)
+    {
+        return;
+    }
+
+    legend.innerHTML = "";
+
+    dailyChart.data.datasets.forEach(
+        function(dataset, index)
+        {
+
+            const item =
+                document.createElement("div");
+
+            item.style.display = "flex";
+            item.style.alignItems = "center";
+            item.style.gap = "8px";
+            item.style.marginBottom = "10px";
+            item.style.cursor = "pointer";
+            item.style.color = "#cbd5e1";
+
+            const color =
+                document.createElement("span");
+
+            color.style.display = "inline-block";
+            color.style.width = "12px";
+            color.style.height = "12px";
+            color.style.minWidth = "12px";
+            color.style.borderRadius = "3px";
+            color.style.backgroundColor =
+                dataset.backgroundColor;
+
+            const text =
+                document.createElement("span");
+
+            text.textContent =
+                dataset.label || "Sin sección";
+
+            text.style.lineHeight = "1.3";
+            text.style.wordBreak = "break-word";
+
+            item.appendChild(color);
+            item.appendChild(text);
+
+            item.onclick =
+                function()
+                {
+
+                    const meta =
+                        dailyChart.getDatasetMeta(index);
+
+                    meta.hidden =
+                        meta.hidden === null
+                        ? !dailyChart.data.datasets[index].hidden
+                        : null;
+
+                    dailyChart.update();
+
+                    item.style.opacity =
+                        meta.hidden
+                        ? "0.35"
+                        : "1";
+                };
+
+            legend.appendChild(item);
+
+        }
+    );
+
+}
+
+
+function updateStats()
+{
+
+const total =
+filteredRows.length;
+
+
+const uniqueIps =
+new Set(
+filteredRows
+.map(
+function(row)
+{
+return (row.dataset.ip || "").trim();
+}
+)
+);
+
+
+const today =
+new Date()
+.toISOString()
+.slice(0,10);
+
+
+const todayCount =
+filteredRows.filter(
+function(row)
+{
+return (row.dataset.date || "") === today;
+}
+).length;
+
+
+statFiltered.textContent =
+total;
+
+filterCount.textContent =
+total;
+
+
+if (!filterIp.value &&
+!filterSection.value &&
+!filterDate.value)
+{
+
+statTotal.textContent =
+total;
+
+statIps.textContent =
+uniqueIps.size;
+
+statToday.textContent =
+todayCount;
+
+}
+
+}
+
+
+/* =========================================================
+   TABLE
+   ========================================================= */
+
+function renderTable()
+{
+
+const total =
+filteredRows.length;
+
+
+const totalPages =
+Math.max(
+1,
+Math.ceil(
+total / rowsPerPage
+)
+);
+
+
+if (currentPage > totalPages)
+{
+currentPage = totalPages;
+}
+
+
+const start =
+(currentPage - 1) *
+rowsPerPage;
+
+
+const end =
+start + rowsPerPage;
+
+
+rows.forEach(
+function(row)
+{
+row.style.display = "none";
+}
+);
+
+
+filteredRows
+.slice(start,end)
+.forEach(
+function(row)
+{
+row.style.display = "";
+}
+);
+
+
+if (total === 0)
+{
+
+paginationInfo.textContent =
+"No hay registros";
+
+}
+else
+{
+
+paginationInfo.textContent =
+"Mostrando " +
+(start + 1) +
+" - " +
+Math.min(end,total) +
+" de " +
+total;
+
+}
+
+
+pageInfo.textContent =
+"Página " +
+currentPage +
+" de " +
+totalPages;
+
+
+previousPage.disabled =
+currentPage <= 1;
+
+
+nextPage.disabled =
+currentPage >= totalPages;
+
+}
+
+
+/* =========================================================
+   FILTERS
+   ========================================================= */
+
+function applyFilters()
+{
+
+const ip =
+filterIp.value
+.trim()
+.toLowerCase();
+
+const section =
+filterSection.value
+.trim()
+.toLowerCase();
+
+const date =
+filterDate.value
+.trim();
+
+
+filteredRows =
+rows.filter(
+function(row)
+{
+
+const rowIp =
+(row.dataset.ip || "")
+.trim()
+.toLowerCase();
+
+const rowSection =
+(row.dataset.section || "")
+.trim()
+.toLowerCase();
+
+const rowDate =
+(row.dataset.date || "")
+.trim();
+
+
+const matchIp =
+!ip || rowIp === ip;
+
+const matchSection =
+!section || rowSection === section;
+
+const matchDate =
+!date || rowDate === date;
+
+
+return (
+matchIp &&
+matchSection &&
+matchDate
+);
+
+}
+);
+
+
+currentPage = 1;
+
+
+updateStats();
+
+updateCharts();
+
+renderTable();
+
+}
+
+
+/* =========================================================
+   EVENTS
+   ========================================================= */
+
+filterIp.addEventListener(
+"change",
+applyFilters
+);
+
+filterSection.addEventListener(
+"change",
+applyFilters
+);
+
+filterDate.addEventListener(
+"change",
+applyFilters
+);
+
+
+clearFilters.addEventListener(
+"click",
+function()
+{
+
+filterIp.value = "";
+
+filterSection.value = "";
+
+filterDate.value = "";
+
+applyFilters();
+
+}
+);
+
+
+/* =========================================================
+   PAGINATION
+   ========================================================= */
+
+previousPage.addEventListener(
+"click",
+function()
+{
+
+if (currentPage > 1)
+{
+
+currentPage--;
+
+renderTable();
+
+}
+
+}
+);
+
+
+nextPage.addEventListener(
+"click",
+function()
+{
+
+const totalPages =
+Math.max(
+1,
+Math.ceil(
+filteredRows.length /
+rowsPerPage
+)
+);
+
+
+if (currentPage < totalPages)
+{
+
+currentPage++;
+
+renderTable();
+
+}
+
+}
+);
+
+
+/* =========================================================
+   INITIAL LOAD
+   ========================================================= */
+
+applyFilters();
+
+});
+
+</script>
+
+
+
+
+
+<script>
+
+</script>
+
+</body>
+
+</html>
+"""
+
+        page = page.replace(
+            "__TOTAL_VISITAS__",
+            str(total_visitas)
+        )
+
+        page = page.replace(
+            "__IPS_UNICAS__",
+            str(ips_unicas)
+        )
+
+        page = page.replace(
+            "__VISITAS_HOY__",
+            str(visitas_hoy)
+        )
+
+        page = page.replace(
+            "__IP_OPTIONS__",
+            ip_options
+        )
+
+        page = page.replace(
+            "__SECTION_OPTIONS__",
+            section_options
+        )
+
+        page = page.replace(
+            "__DATE_OPTIONS__",
+            date_options
+        )
+
+        page = page.replace(
+            "__ROWS_HTML__",
+            rows_html
+        )
+
+        return HTMLResponse(content=page)
+
+    finally:
+        conn.close()
